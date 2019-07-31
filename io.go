@@ -2,6 +2,7 @@ package gpio
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"time"
 )
@@ -13,35 +14,99 @@ type Pin struct {
 	f         *os.File
 }
 
-// NewInput opens the given pin number for reading. The number provided should be the pin number known by the kernel
-func NewInput(p uint) Pin {
-	pin := Pin{
-		Number: p,
+func retry(retryN int, retryDuration time.Duration, fn func() error) error {
+	for i := 0; ; i++ {
+		err := fn()
+		if err != nil {
+			if i == retryN-1 {
+				return err
+			} else {
+				fmt.Println(err.Error())
+				fmt.Printf("retrying...")
+				time.Sleep(retryDuration)
+			}
+		} else {
+			break
+		}
 	}
-	exportGPIO(pin)
-	time.Sleep(10 * time.Millisecond)
-	pin.direction = inDirection
-	setDirection(pin, inDirection, 0)
-	pin = openPin(pin, false)
-	return pin
+	return nil
 }
 
-// NewOutput opens the given pin number for writing. The number provided should be the pin number known by the kernel
-// NewOutput also needs to know whether the pin should be initialized high (true) or low (false)
-func NewOutput(p uint, initHigh bool) Pin {
+func NewInput(p uint) (Pin, error) {
+	return NewInputWithRetry(p, 1, 0)
+}
+
+// NewInputWithRetry opens the given pin number for reading. The number provided should be the pin number known by the kernel
+func NewInputWithRetry(p uint, retryN int, retryDuration time.Duration) (Pin, error) {
 	pin := Pin{
 		Number: p,
 	}
-	exportGPIO(pin)
+
+	err := retry(retryN, retryDuration, func() error {
+		err := exportGPIO(pin)
+		return err
+	})
+	if err != nil {
+		return Pin{}, err
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	pin.direction = inDirection
+
+	err = retry(retryN, retryDuration, func() error {
+		err = setDirection(pin, inDirection, 0)
+		if err != nil {
+			return err
+		}
+		pin, err = openPin(pin, false)
+		return err
+	})
+	if err != nil {
+		return Pin{}, err
+	}
+
+	return pin, nil
+}
+
+// NewOutputWithRetry opens the given pin number for writing. The number provided should be the pin number known by the kernel
+// NewOutputWithRetry also needs to know whether the pin should be initialized high (true) or low (false)
+func NewOutputWithRetry(p uint, initHigh bool, retryN int, retryDuration time.Duration) (Pin, error) {
+	var err error
+
+	pin := Pin{
+		Number: p,
+	}
+
+	err = retry(retryN, retryDuration, func() error {
+		return exportGPIO(pin)
+	})
+	if err != nil {
+		return Pin{}, err
+	}
+
 	time.Sleep(10 * time.Millisecond)
 	initVal := uint(0)
 	if initHigh {
 		initVal = uint(1)
 	}
 	pin.direction = outDirection
-	setDirection(pin, outDirection, initVal)
-	pin = openPin(pin, true)
-	return pin
+
+
+	err = retry(retryN, retryDuration, func() error {
+		return setDirection(pin, outDirection, initVal)
+	})
+	if err != nil {
+		return Pin{}, err
+	}
+
+	err = retry(retryN, retryDuration, func() error {
+		pin, err = openPin(pin, true)
+		return err
+	})
+	if err != nil {
+		return Pin{}, err
+	}
+	return pin, nil
 }
 
 // Close releases the resources related to Pin. This doen't unexport Pin, use Cleanup() instead
